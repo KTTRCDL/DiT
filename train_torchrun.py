@@ -11,7 +11,6 @@ import torch
 # the first flag below was False when we tested this script but True makes A100 training a lot faster:
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
-import torch.multiprocessing as mp
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
@@ -108,16 +107,14 @@ def center_crop_arr(pil_image, image_size):
 #                                  Training Loop                                #
 #################################################################################
 
-def main(rank, args):
+def main(args):
     """
     Trains a new DiT model.
     """
     assert torch.cuda.is_available(), "Training currently requires at least one GPU."
 
     # Setup DDP:
-    os.environ["MASTER_ADDR"] = args.master_addr
-    os.environ["MASTER_PORT"] = args.master_port
-    dist.init_process_group("nccl", rank=rank, world_size=args.world_size)
+    dist.init_process_group("nccl")
 
     assert args.global_batch_size % dist.get_world_size() == 0, f"Batch size must be divisible by world size."
     rank = dist.get_rank()
@@ -208,7 +205,8 @@ def main(rank, args):
                 x = vae.encode(x).latent_dist.sample().mul_(0.18215)
             t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
             model_kwargs = dict(y=y)
-            loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
+            with torch.autocast(device_type="cuda"):
+                loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
             loss = loss_dict["loss"].mean()
             opt.zero_grad()
             loss.backward()
@@ -270,12 +268,8 @@ if __name__ == "__main__":
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--ckpt-every", type=int, default=50_000)
-    # DDP args:
-    parser.add_argument("--cuda_visible_devices", type=str, default="2,3")
-    parser.add_argument("--master-addr", type=str, default="localhost")
-    parser.add_argument("--master-port", type=str, default="12355")
+    # reduce float16 usage to avoid OOM on A100:
+    parser.add_argument("--fp16", action="store_true")
+
     args = parser.parse_args()
-    
-    os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
-    args.__setattr__('world_size', len(args.cuda_visible_devices.split(',')))
-    mp.spawn(main, args=(args,), nprocs=args.world_size)
+    main(args)
