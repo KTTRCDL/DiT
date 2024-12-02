@@ -1,5 +1,8 @@
 samples/
 ckpt/
+results/
+data
+sample.png
 
 .vscode/
 # Byte-compiled / optimized / DLL files
